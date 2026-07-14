@@ -6,7 +6,7 @@ on:
     paths:
       - "agent/**"
       - "agent.py"
-      - ".github/workflows/build-agents.yml"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
 
 permissions:
@@ -30,10 +30,10 @@ jobs:
     steps:
       # ────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -160,11 +160,11 @@ jobs:
   publish:
     name: Publicar en public/
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
