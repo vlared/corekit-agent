@@ -1,67 +1,194 @@
-name: Compilación Multiplataforma CoreKit Agent
+name: Build CoreKit Agents
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
+    paths:
+      - "agent/**"
+      - "agent.py"
+      - ".github/workflows/build-agents.yml"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Compilar en ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-22.04
+            target: linux
 
     steps:
-      - name: Descargar Código Fuente
-        uses: actions/checkout@v4
+      # ────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: Configurar Python
-        uses: actions/setup-python@v5
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
+          python-version: "3.12"
 
-      - name: Instalar Dependencias
+      - name: Locate agent.py
+        id: locate
+        shell: bash
+        run: |
+          if [ -f "agent.py" ]; then
+            echo "path=agent.py" >> $GITHUB_OUTPUT
+          elif [ -f "agent/agent.py" ]; then
+            echo "path=agent/agent.py" >> $GITHUB_OUTPUT
+          else
+            echo "❌ agent.py no encontrado ni en raíz ni en agent/"
+            ls -la
+            exit 1
+          fi
+
+      - name: Install Python deps
+        shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller psutil websockets
+          python -m pip install pyinstaller psutil websockets
 
-      - name: Compilar Agente Windows (.exe)
-        if: matrix.os == 'windows-latest'
+      # ─────────────── WINDOWS ───────────────
+      - name: Build Windows .exe
+        if: matrix.target == 'windows'
+        shell: cmd
         run: |
-          pyinstaller --onefile --noconsole --clean --name CoreKitAgent agent.py
-          mkdir -p public
-          cp dist/CoreKitAgent.exe public/
-        shell: bash
+          pyinstaller --onefile --noconsole --clean --name CoreKitAgent ${{ steps.locate.outputs.path }}
+          dir dist
 
-      - name: Compilar Agente macOS (.dmg)
-        if: matrix.os == 'macos-latest'
-        run: |
-          pyinstaller --onefile --windowed --clean --name CoreKitAgent --osx-bundle-identifier com.corekit.agent agent.py
-          hdiutil create -format UDZO -srcfolder dist/CoreKitAgent.app dist/CoreKitAgent.dmg
-          mkdir -p public
-          cp dist/CoreKitAgent.dmg public/
-
-      - name: Compilar Agente Linux (.AppImage)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          pyinstaller --onefile --clean --name corekit-agent agent.py
-          wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
-          mkdir -p CoreKitAgent.AppDir/usr/bin
-          cp dist/corekit-agent CoreKitAgent.AppDir/usr/bin/
-          echo -e '#!/bin/sh\nexec "$APPDIR/usr/bin/corekit-agent" "$@"' > CoreKitAgent.AppDir/AppRun
-          chmod +x CoreKitAgent.AppDir/AppRun
-          echo -e '[Desktop Entry]\nType=Application\nName=CoreKitAgent\nExec=corekit-agent\nIcon=corekit\nCategories=Utility;' > CoreKitAgent.AppDir/corekit.desktop
-          wget -O CoreKitAgent.AppDir/corekit.png https://raw.githubusercontent.com/github/explore/main/topics/javascript/javascript.png
-          ARCH=x86_64 ./appimagetool CoreKitAgent.AppDir corekit-agent.AppImage
-          mkdir -p public
-          cp corekit-agent.AppImage public/
-
-      - name: Guardar Ejecutables como Artefactos
+      - name: Upload Windows artifact
+        if: matrix.target == 'windows'
         uses: actions/upload-artifact@v4
         with:
-          name: agentes-${{ matrix.os }}
-          path: public/
+          name: CoreKitAgent-windows
+          path: dist/CoreKitAgent.exe
           if-no-files-found: error
+
+      # ─────────────── MACOS ───────────────
+      - name: Install create-dmg
+        if: matrix.target == 'macos'
+        run: brew install create-dmg
+
+      - name: Build macOS .app + .dmg
+        if: matrix.target == 'macos'
+        run: |
+          pyinstaller --onefile --windowed --clean \
+            --name CoreKitAgent \
+            --osx-bundle-identifier com.corekit.agent \
+            ${{ steps.locate.outputs.path }}
+          ls -la dist
+          create-dmg \
+            --volname "CoreKit Agent" \
+            --window-size 500 320 \
+            --icon-size 96 \
+            --icon "CoreKitAgent.app" 130 150 \
+            --app-drop-link 370 150 \
+            --no-internet-enable \
+            dist/CoreKitAgent.dmg \
+            dist/CoreKitAgent.app || true
+          ls -la dist
+
+      - name: Upload macOS artifact
+        if: matrix.target == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoreKitAgent-macos
+          path: dist/CoreKitAgent.dmg
+          if-no-files-found: error
+
+      # ─────────────── LINUX ───────────────
+      - name: Install AppImage tools
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 wget file
+          wget -q -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+
+      - name: Build Linux binary + AppImage
+        if: matrix.target == 'linux'
+        run: |
+          pyinstaller --onefile --clean --name corekit-agent ${{ steps.locate.outputs.path }}
+          ls -la dist
+
+          mkdir -p CoreKitAgent.AppDir/usr/bin
+          cp dist/corekit-agent CoreKitAgent.AppDir/usr/bin/
+          chmod +x CoreKitAgent.AppDir/usr/bin/corekit-agent
+
+          cat > CoreKitAgent.AppDir/AppRun <<'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/corekit-agent" "$@"
+          EOF
+          chmod +x CoreKitAgent.AppDir/AppRun
+
+          cat > CoreKitAgent.AppDir/corekit-agent.desktop <<'EOF'
+          [Desktop Entry]
+          Name=CoreKit Agent
+          Exec=corekit-agent
+          Icon=corekit-agent
+          Type=Application
+          Categories=System;
+          EOF
+
+          # Icono placeholder 1x1 png válido
+          printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90\x77\x53\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xa7\x35\x81\x84\x00\x00\x00\x00IEND\xaeB`\x82' > CoreKitAgent.AppDir/corekit-agent.png
+
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run CoreKitAgent.AppDir corekit-agent.AppImage
+          ls -la corekit-agent.AppImage
+
+      - name: Upload Linux artifact
+        if: matrix.target == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoreKitAgent-linux
+          path: corekit-agent.AppImage
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════════════════
+  # Copiar los 3 artifacts a public/ y commitear
+  # ══════════════════════════════════════════════════════════════════════
+  publish:
+    name: Publicar en public/
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Move to public/
+        run: |
+          mkdir -p public
+          cp artifacts/CoreKitAgent-windows/CoreKitAgent.exe   public/CoreKitAgent.exe
+          cp artifacts/CoreKitAgent-macos/CoreKitAgent.dmg     public/CoreKitAgent.dmg
+          cp artifacts/CoreKitAgent-linux/corekit-agent.AppImage public/corekit-agent.AppImage
+          ls -lah public/CoreKitAgent* public/corekit-agent*
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/CoreKitAgent.exe public/CoreKitAgent.dmg public/corekit-agent.AppImage
+          if git diff --staged --quiet; then
+            echo "Sin cambios en agentes."
+          else
+            git commit -m "chore(agents): rebuild binarios v3.3 [skip ci]"
+            git push
+          fi
